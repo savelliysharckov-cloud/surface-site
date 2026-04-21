@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Reactive Memory Breakdown Surface</title>
+
+  <style>
+    body {
+      margin: 0;
+      overflow: hidden;
+      background: #050505;
+      font-family: monospace;
+    }
+
+    canvas { display: block; }
+
+    .email {
+      position: fixed;
+      right: 20px;
+      bottom: 20px;
+      color: rgba(255,255,255,0.85);
+      font-size: 14px;
+      pointer-events: none;
+      z-index: 10;
+    }
+
+    .hint {
+      position: fixed;
+      left: 20px;
+      bottom: 20px;
+      color: rgba(255,255,255,0.35);
+      font-size: 12px;
+      z-index: 10;
+      pointer-events: none;
+      letter-spacing: 0.3px;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="email">savelsharkov@gmail.com</div>
+<div class="hint">double click for sound</div>
+
+<!-- 🔊 AUDIO -->
+<audio id="bg" src="sound.mp3" loop></audio>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+
+<script>
+
+const scene = new THREE.Scene();
+
+const camera = new THREE.PerspectiveCamera(
+  45,
+  window.innerWidth / window.innerHeight,
+  0.1,
+  100
+);
+camera.position.z = 2;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+// ================= GEOMETRY =================
+const geometry = new THREE.PlaneGeometry(2, 2, 256, 256);
+
+// ================= MEMORY =================
+const size = 256;
+const data = new Float32Array(size * size * 4);
+
+const memoryTexture = new THREE.DataTexture(
+  data,
+  size,
+  size,
+  THREE.RGBAFormat,
+  THREE.FloatType
+);
+memoryTexture.needsUpdate = true;
+
+// ================= INPUT =================
+const mouse = new THREE.Vector2(0.5, 0.5);
+const lastMouse = new THREE.Vector2(0.5, 0.5);
+
+let speed = 0;
+let heat = 0;
+
+// ================= AUDIO =================
+const audio = document.getElementById("bg");
+audio.volume = 1.0;
+
+let audioStarted = false;
+
+function startAudio() {
+  if (audioStarted) return;
+
+  audio.play()
+    .then(() => {
+      audioStarted = true;
+    })
+    .catch(() => {});
+}
+
+// 🔥 trigger (safe)
+window.addEventListener("mousemove", startAudio);
+window.addEventListener("click", startAudio);
+window.addEventListener("dblclick", startAudio);
+
+// ================= SHADER =================
+const material = new THREE.ShaderMaterial({
+
+  uniforms: {
+    uTime: { value: 0 },
+    uMouse: { value: mouse },
+    uMemory: { value: memoryTexture },
+    uSpeed: { value: 0 },
+    uHeat: { value: 0 }
+  },
+
+  vertexShader: `
+    uniform float uTime;
+    uniform vec2 uMouse;
+    uniform sampler2D uMemory;
+    uniform float uSpeed;
+    uniform float uHeat;
+
+    varying vec2 vUv;
+
+    float noise(vec2 p){
+      return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453);
+    }
+
+    void main() {
+
+      vUv = uv;
+
+      float mem = texture2D(uMemory, uv).r;
+
+      float dist = distance(uv, uMouse);
+      float influence = smoothstep(0.45, 0.0, dist);
+
+      float chaos = uSpeed * 3.0;
+      float burn = uHeat * 0.02;
+
+      float n = noise(uv * (6.0 + chaos * 10.0) + uTime);
+
+      float wave =
+        sin(uv.x * 10.0 + uTime) * 0.06 +
+        sin(uv.y * 12.0 + uTime) * 0.06;
+
+      float displacement = n * (0.04 + chaos * 0.1);
+
+      displacement += mem * 0.6;
+      displacement += influence * (0.4 + chaos * 0.4);
+      displacement += wave;
+
+      displacement += sin(uv.x * 80.0 + uTime * 25.0) * burn;
+      displacement += sin(uv.y * 90.0 - uTime * 20.0) * burn;
+
+      vec3 pos = position;
+      pos.z += displacement;
+
+      gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+    }
+  `,
+
+  fragmentShader: `
+    uniform float uTime;
+    uniform vec2 uMouse;
+    uniform sampler2D uMemory;
+    uniform float uSpeed;
+    uniform float uHeat;
+
+    varying vec2 vUv;
+
+    void main() {
+
+      float mem = texture2D(uMemory, vUv).r;
+
+      float dist = distance(vUv, uMouse);
+      float influence = smoothstep(0.45, 0.0, dist);
+
+      float pulse = sin(uTime * 2.0) * 0.5 + 0.5;
+      float shape = sin(vUv.x * 10.0 + uTime * 2.0) * 0.5 + 0.5;
+
+      float halo = influence * (0.5 + pulse * 0.6 + shape * 0.3);
+
+      float core = smoothstep(0.15, 0.0, dist);
+      core *= (0.6 + sin(uTime * 1.5) * 0.4);
+
+      float aberration = uSpeed * 2.0;
+      float burn = uHeat * 0.15;
+
+      vec3 base = vec3(0.03);
+      vec3 mid = vec3(0.12);
+
+      vec3 color = mix(base, mid, mem);
+
+      color += halo * vec3(0.35 + aberration);
+      color += core * vec3(0.6, 0.08, 0.08);
+
+      color += burn * vec3(0.7, 0.05, 0.05);
+      color += burn * sin(vUv.x * 120.0 + uTime * 30.0) * 0.1;
+
+      float grain = fract(sin(vUv.x * 900.0 + vUv.y * 900.0 + uTime) * 43758.0);
+      color += grain * 0.02;
+
+      gl_FragColor = vec4(color, 1.0);
+    }
+  `
+});
+
+const mesh = new THREE.Mesh(geometry, material);
+scene.add(mesh);
+
+// ================= MEMORY =================
+function writeMemory(x, y, amount) {
+
+  const ix = Math.floor(x * size);
+  const iy = Math.floor(y * size);
+
+  const index = (ix + iy * size) * 4;
+
+  if (index >= 0 && index < data.length) {
+    data[index] = Math.min(1.0, data[index] + amount);
+  }
+}
+
+function decay() {
+  for (let i = 0; i < data.length; i += 4) {
+    data[i] *= 0.97;
+  }
+}
+
+// ================= INPUT =================
+window.addEventListener('mousemove', (e) => {
+
+  startAudio();
+
+  mouse.x = e.clientX / window.innerWidth;
+  mouse.y = 1.0 - e.clientY / window.innerHeight;
+
+  const dx = mouse.x - lastMouse.x;
+  const dy = mouse.y - lastMouse.y;
+
+  speed = Math.sqrt(dx*dx + dy*dy);
+
+  lastMouse.copy(mouse);
+
+  heat += speed * 1.5;
+  heat *= 0.96;
+
+  writeMemory(mouse.x, mouse.y, 0.2 + speed * 2.0);
+});
+
+// ================= LOOP =================
+function animate() {
+  requestAnimationFrame(animate);
+
+  material.uniforms.uTime.value += 0.01;
+
+  decay();
+  memoryTexture.needsUpdate = true;
+
+  material.uniforms.uMouse.value = mouse;
+  material.uniforms.uSpeed.value = speed;
+  material.uniforms.uHeat.value = heat;
+
+  renderer.render(scene, camera);
+}
+
+animate();
+
+// ================= RESIZE =================
+window.addEventListener('resize', () => {
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  camera.aspect = window.innerWidth / window.innerHeight;
+  camera.updateProjectionMatrix();
+});
+
+</script>
+
+</body>
+</html>
