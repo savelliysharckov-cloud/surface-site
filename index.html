@@ -14,194 +14,338 @@
 
     canvas { display: block; }
 
-    .email {
+    /* общий стиль кнопок в углах */
+    .face, .email {
       position: fixed;
-      right: 20px;
       bottom: 20px;
-      color: rgba(255,255,255,0.85);
-      font-size: 14px;
-      pointer-events: none;
+      color: rgba(255,255,255,0.78);
+      text-decoration: none;
       z-index: 10;
+      letter-spacing: 0.3px;
+      font-family: monospace;
+      transition: color 0.2s ease;
+      cursor: pointer;
+    }
+
+    .face {
+      left: 20px;
+      font-size: 15px;
+    }
+
+    .email {
+      right: 20px;
+      font-size: 14px;
+    }
+
+    .face:hover, .email:hover {
+      color: #fff;
+      animation: burn 0.14s infinite alternate;
+    }
+
+    @keyframes burn {
+      0% {
+        text-shadow:
+          0 0 4px  rgba(255, 100, 40, 1),
+          0 0 12px rgba(255, 60, 20, 0.9),
+          0 0 24px rgba(255, 30, 0, 0.7),
+          0 0 40px rgba(255, 200, 50, 0.4);
+        transform: translate(0, 0);
+      }
+      100% {
+        text-shadow:
+          0 0 6px  rgba(255, 220, 100, 1),
+          0 0 16px rgba(255, 100, 30, 1),
+          0 0 32px rgba(255, 40, 0, 0.8),
+          0 0 60px rgba(255, 250, 100, 0.3);
+        transform: translate(0.6px, -0.4px);
+      }
     }
 
     .hint {
       position: fixed;
       left: 20px;
-      bottom: 20px;
+      bottom: 55px;
       color: rgba(255,255,255,0.35);
       font-size: 12px;
       z-index: 10;
       pointer-events: none;
       letter-spacing: 0.3px;
+      transition: opacity 0.8s ease;
+    }
+
+    .hint.hidden { opacity: 0; }
+
+    /* flash overlay — отдельный div для вспышек-молний поверх шейдера */
+    .flash-overlay {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      background: rgba(255,255,255,0);
+      pointer-events: none;
+      z-index: 5;
+      mix-blend-mode: screen;
     }
   </style>
 </head>
 
 <body>
 
-<div class="email">savelsharkov@gmail.com</div>
-<div class="hint">double click for sound</div>
+<a class="face" href="about.html">─=≡Σ((((͡× ͜ʖ ͡×)</a>
 
-<!-- 🔊 AUDIO -->
-<audio id="bg" src="sound.mp3" loop></audio>
+<a class="email" href="mailto:savelsharkov@gmail.com" id="emailBtn">savelsharkov@gmail.com</a>
+
+<div class="hint" id="hint">click for sound</div>
+
+<div class="flash-overlay" id="flashOverlay"></div>
+
+<audio id="bg" src="sound.mp3" loop crossorigin="anonymous"></audio>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
 
 <script>
 
+// ================= SCENE =================
 const scene = new THREE.Scene();
-
-const camera = new THREE.PerspectiveCamera(
-  45,
-  window.innerWidth / window.innerHeight,
-  0.1,
-  100
-);
+const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 100);
 camera.position.z = 2;
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// ================= GEOMETRY =================
 const geometry = new THREE.PlaneGeometry(2, 2, 256, 256);
 
 // ================= MEMORY =================
-const size = 256;
+const size = 128;
 const data = new Float32Array(size * size * 4);
-
-const memoryTexture = new THREE.DataTexture(
-  data,
-  size,
-  size,
-  THREE.RGBAFormat,
-  THREE.FloatType
-);
+const memoryTexture = new THREE.DataTexture(data, size, size, THREE.RGBAFormat, THREE.FloatType);
 memoryTexture.needsUpdate = true;
 
-// ================= INPUT =================
+// ================= STATE =================
 const mouse = new THREE.Vector2(0.5, 0.5);
 const lastMouse = new THREE.Vector2(0.5, 0.5);
 
 let speed = 0;
 let heat = 0;
+let activity = 0;
+let colorPhase = 0;
+let flash = 0;            // вспышки при быстром движении
+let lightning = 0;        // интенсивность молний
 
 // ================= AUDIO =================
 const audio = document.getElementById("bg");
-audio.volume = 1.0;
+const hint  = document.getElementById("hint");
+const flashOverlay = document.getElementById("flashOverlay");
 
+let audioCtx, srcNode, gainNode, distortion, filter;
+let lastCurveAmount = -1;
 let audioStarted = false;
+
+function makeDistortionCurve(amount) {
+  const samples = 4096;
+  const curve = new Float32Array(samples);
+  const deg = Math.PI / 180;
+  for (let i = 0; i < samples; i++) {
+    const x = (i * 2) / samples - 1;
+    curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
+  }
+  return curve;
+}
+
+function updateDistortion(amount) {
+  if (!distortion) return;
+  if (Math.abs(amount - lastCurveAmount) < 3) return;
+  lastCurveAmount = amount;
+  distortion.curve = makeDistortionCurve(amount);
+  distortion.oversample = '2x';
+}
+
+function setupAudioGraph() {
+  if (audioCtx) return;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  audioCtx = new AC();
+
+  srcNode    = audioCtx.createMediaElementSource(audio);
+  distortion = audioCtx.createWaveShaper();
+  filter     = audioCtx.createBiquadFilter();
+  gainNode   = audioCtx.createGain();
+
+  filter.type = "highshelf";
+  filter.frequency.value = 2500;
+  filter.gain.value = 0;
+
+  srcNode.connect(distortion);
+  distortion.connect(filter);
+  filter.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+
+  updateDistortion(0);
+  gainNode.gain.value = 0.15;
+}
 
 function startAudio() {
   if (audioStarted) return;
-
+  setupAudioGraph();
+  if (audioCtx.state === "suspended") audioCtx.resume();
   audio.play()
     .then(() => {
       audioStarted = true;
+      hint.classList.add("hidden");
     })
     .catch(() => {});
 }
 
-// 🔥 trigger (safe)
-window.addEventListener("mousemove", startAudio);
 window.addEventListener("click", startAudio);
 window.addEventListener("dblclick", startAudio);
+window.addEventListener("touchstart", startAudio);
+
+// email button: copy to clipboard on click (mailto opens automatically)
+document.getElementById("emailBtn").addEventListener("click", () => {
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText("savelsharkov@gmail.com").catch(() => {});
+  }
+});
 
 // ================= SHADER =================
 const material = new THREE.ShaderMaterial({
-
   uniforms: {
-    uTime: { value: 0 },
-    uMouse: { value: mouse },
-    uMemory: { value: memoryTexture },
-    uSpeed: { value: 0 },
-    uHeat: { value: 0 }
+    uTime:       { value: 0 },
+    uMouse:      { value: mouse },
+    uMemory:     { value: memoryTexture },
+    uSpeed:      { value: 0 },
+    uHeat:       { value: 0 },
+    uActivity:   { value: 0 },
+    uColorPhase: { value: 0 },
+    uLightning:  { value: 0 }
   },
 
   vertexShader: `
     uniform float uTime;
-    uniform vec2 uMouse;
+    uniform vec2  uMouse;
     uniform sampler2D uMemory;
     uniform float uSpeed;
     uniform float uHeat;
+    uniform float uActivity;
 
     varying vec2 vUv;
 
-    float noise(vec2 p){
-      return fract(sin(dot(p, vec2(12.9898,78.233))) * 43758.5453);
-    }
+    float noise(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453); }
 
     void main() {
-
       vUv = uv;
-
       float mem = texture2D(uMemory, uv).r;
-
       float dist = distance(uv, uMouse);
-      float influence = smoothstep(0.45, 0.0, dist);
+
+      // expanding radius — при большой активности/скорости halo расширяется почти на весь экран
+      float expansion = max(uSpeed * 10.0, uActivity * 1.5);
+      float haloRadius = 0.45 + expansion;
+      float influence = smoothstep(haloRadius, 0.0, dist);
 
       float chaos = uSpeed * 3.0;
-      float burn = uHeat * 0.02;
+      float burn  = uHeat  * 0.02;
 
       float n = noise(uv * (6.0 + chaos * 10.0) + uTime);
+      float nAmp = (0.005 + uActivity * 0.12);
 
       float wave =
-        sin(uv.x * 10.0 + uTime) * 0.06 +
-        sin(uv.y * 12.0 + uTime) * 0.06;
+        (sin(uv.x * 10.0 + uTime) * 0.06 +
+         sin(uv.y * 12.0 + uTime) * 0.06) * (0.05 + uActivity * 0.95);
 
-      float displacement = n * (0.04 + chaos * 0.1);
-
+      float displacement = n * nAmp;
       displacement += mem * 0.6;
-      displacement += influence * (0.4 + chaos * 0.4);
+      displacement += influence * (0.05 + uActivity * 0.7);
       displacement += wave;
-
       displacement += sin(uv.x * 80.0 + uTime * 25.0) * burn;
       displacement += sin(uv.y * 90.0 - uTime * 20.0) * burn;
 
       vec3 pos = position;
       pos.z += displacement;
-
       gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
     }
   `,
 
   fragmentShader: `
     uniform float uTime;
-    uniform vec2 uMouse;
+    uniform vec2  uMouse;
     uniform sampler2D uMemory;
     uniform float uSpeed;
     uniform float uHeat;
+    uniform float uActivity;
+    uniform float uColorPhase;
+    uniform float uLightning;
 
     varying vec2 vUv;
 
+    // палитра без зелёного, с двумя белыми стопами для "больше белого"
+    vec3 cyclePalette(float t) {
+      t = fract(t);
+      vec3 red    = vec3(1.0, 0.12, 0.08);
+      vec3 white  = vec3(1.0, 1.0, 1.0);
+      vec3 yellow = vec3(1.0, 0.9, 0.15);
+
+      float seg = t * 4.0;
+      float i = floor(seg);
+      float f = smoothstep(0.0, 1.0, fract(seg));
+
+      if (i < 1.0) return mix(red,    white,  f);
+      if (i < 2.0) return mix(white,  yellow, f);
+      if (i < 3.0) return mix(yellow, white,  f);
+      return            mix(white,  red,    f);
+    }
+
+    float hash(vec2 p){ return fract(sin(dot(p, vec2(41.3, 289.1))) * 43758.5); }
+
     void main() {
-
       float mem = texture2D(uMemory, vUv).r;
-
       float dist = distance(vUv, uMouse);
-      float influence = smoothstep(0.45, 0.0, dist);
 
-      float pulse = sin(uTime * 2.0) * 0.5 + 0.5;
-      float shape = sin(vUv.x * 10.0 + uTime * 2.0) * 0.5 + 0.5;
+      // тот же expansion что и в vertex — синхронно расширяющийся световой ареал
+      float expansion = max(uSpeed * 10.0, uActivity * 1.5);
+      float haloRadius = 0.45 + expansion;
+      float coreRadius = 0.15 + expansion * 0.45;
 
-      float halo = influence * (0.5 + pulse * 0.6 + shape * 0.3);
+      float influence = smoothstep(haloRadius, 0.0, dist);
+      float core = smoothstep(coreRadius, 0.0, dist);
 
-      float core = smoothstep(0.15, 0.0, dist);
-      core *= (0.6 + sin(uTime * 1.5) * 0.4);
+      float pulse = (sin(uTime * 2.0) * 0.5 + 0.5) * uActivity;
+      float shape = (sin(vUv.x * 10.0 + uTime * 2.0) * 0.5 + 0.5);
+
+      float halo = influence * (0.08 + pulse * 0.6 + shape * 0.3 * uActivity);
+      core *= (0.4 + sin(uTime * 1.5) * 0.4 * uActivity);
 
       float aberration = uSpeed * 2.0;
       float burn = uHeat * 0.15;
 
       vec3 base = vec3(0.03);
-      vec3 mid = vec3(0.12);
+      vec3 mid  = vec3(0.12);
+
+      vec3 accent = cyclePalette(uColorPhase);
+      vec3 restColor = vec3(0.6, 0.08, 0.08);
+      vec3 activeAccent = mix(restColor, accent, uActivity);
 
       vec3 color = mix(base, mid, mem);
-
-      color += halo * vec3(0.35 + aberration);
-      color += core * vec3(0.6, 0.08, 0.08);
-
-      color += burn * vec3(0.7, 0.05, 0.05);
+      color += mem * mix(vec3(0.4, 0.1, 0.1), accent, uActivity) * 1.2;
+      color += halo * mix(vec3(0.35), accent * (0.9 + aberration), uActivity);
+      color += core * activeAccent;
+      color += burn * accent * 1.2;
       color += burn * sin(vUv.x * 120.0 + uTime * 30.0) * 0.1;
+
+      // ======== LIGHTNING / BOLTS ========
+      if (uLightning > 0.01) {
+        // вертикальные/горизонтальные ветвистые разряды
+        float b1 = smoothstep(0.985, 1.0,
+          hash(vec2(floor(vUv.x * 120.0), floor(uTime * 30.0))));
+        float b2 = smoothstep(0.985, 1.0,
+          hash(vec2(floor(vUv.y * 100.0), floor(uTime * 25.0) + 13.0)));
+        // случайные яркие пятна-искры
+        float sp = smoothstep(0.995, 1.0,
+          hash(floor(vUv * 200.0) + floor(uTime * 40.0)));
+
+        float bolts = (b1 + b2) * uLightning;
+        color += bolts * vec3(1.0, 0.95, 0.85) * 3.0;
+        color += sp    * uLightning * vec3(1.0) * 4.0;
+      }
 
       float grain = fract(sin(vUv.x * 900.0 + vUv.y * 900.0 + uTime) * 43758.0);
       color += grain * 0.02;
@@ -214,58 +358,100 @@ const material = new THREE.ShaderMaterial({
 const mesh = new THREE.Mesh(geometry, material);
 scene.add(mesh);
 
-// ================= MEMORY =================
-function writeMemory(x, y, amount) {
-
+// ================= MEMORY FNS =================
+function writeMemoryPixel(x, y, amount) {
   const ix = Math.floor(x * size);
   const iy = Math.floor(y * size);
-
+  if (ix < 0 || ix >= size || iy < 0 || iy >= size) return;
   const index = (ix + iy * size) * 4;
+  data[index] = Math.min(1.0, data[index] + amount);
+}
 
-  if (index >= 0 && index < data.length) {
-    data[index] = Math.min(1.0, data[index] + amount);
+function writeMemoryLine(x0, y0, x1, y1, amount) {
+  const dx = x1 - x0, dy = y1 - y0;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const steps = Math.max(1, Math.ceil(dist * size));
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    writeMemoryPixel(x0 + dx*t, y0 + dy*t, (amount/steps) * 2.0);
   }
 }
 
 function decay() {
-  for (let i = 0; i < data.length; i += 4) {
-    data[i] *= 0.97;
-  }
+  for (let i = 0; i < data.length; i += 4) data[i] *= 0.97;
 }
 
 // ================= INPUT =================
 window.addEventListener('mousemove', (e) => {
+  const newX = e.clientX / window.innerWidth;
+  const newY = 1.0 - e.clientY / window.innerHeight;
 
-  startAudio();
+  const dx = newX - lastMouse.x;
+  const dy = newY - lastMouse.y;
+  const rawSpeed = Math.sqrt(dx*dx + dy*dy);
 
-  mouse.x = e.clientX / window.innerWidth;
-  mouse.y = 1.0 - e.clientY / window.innerHeight;
+  speed = speed * 0.85 + rawSpeed * 0.15;
 
-  const dx = mouse.x - lastMouse.x;
-  const dy = mouse.y - lastMouse.y;
-
-  speed = Math.sqrt(dx*dx + dy*dy);
-
-  lastMouse.copy(mouse);
-
-  heat += speed * 1.5;
+  heat += rawSpeed * 1.5;
   heat *= 0.96;
 
-  writeMemory(mouse.x, mouse.y, 0.2 + speed * 2.0);
+  activity += rawSpeed * 4.0;
+  if (activity > 1.0) activity = 1.0;
+
+  // цветовой фазер — медленнее в 3 раза (было 0.9)
+  colorPhase += rawSpeed * 0.3;
+
+  // триггер молний при резком всплеске скорости
+  if (rawSpeed > 0.025) {
+    lightning = Math.min(1.0, lightning + rawSpeed * 8.0);
+    flash = Math.min(1.0, flash + rawSpeed * 6.0);
+  }
+
+  writeMemoryLine(lastMouse.x, lastMouse.y, newX, newY, 0.2 + rawSpeed * 2.0);
+
+  lastMouse.x = newX; lastMouse.y = newY;
+  mouse.x = newX; mouse.y = newY;
 });
 
 // ================= LOOP =================
+let frameCount = 0;
+
 function animate() {
   requestAnimationFrame(animate);
+  frameCount++;
 
   material.uniforms.uTime.value += 0.01;
+
+  speed    *= 0.95;
+  activity *= 0.985;
+  lightning *= 0.82;   // молнии быстро затухают — даёт эффект вспышки
+  flash    *= 0.88;
 
   decay();
   memoryTexture.needsUpdate = true;
 
-  material.uniforms.uMouse.value = mouse;
-  material.uniforms.uSpeed.value = speed;
-  material.uniforms.uHeat.value = heat;
+  material.uniforms.uMouse.value      = mouse;
+  material.uniforms.uSpeed.value      = speed;
+  material.uniforms.uHeat.value       = heat;
+  material.uniforms.uActivity.value   = activity;
+  material.uniforms.uColorPhase.value = colorPhase;
+  material.uniforms.uLightning.value  = lightning;
+
+  // DOM-овая вспышка поверх шейдера — резкий флеш всего экрана
+  flashOverlay.style.background = `rgba(255,255,255,${flash * 0.25})`;
+
+  // ======= AUDIO =======
+  if (audioStarted && gainNode) {
+    // максимум 85% — было 100%
+    const targetGain = 0.15 + activity * 0.70;
+    gainNode.gain.setTargetAtTime(targetGain, audioCtx.currentTime, 0.15);
+
+    if (frameCount % 4 === 0) {
+      // меньший потолок дисторшна — было 400, стало 140
+      updateDistortion(activity * 140);
+      filter.gain.setTargetAtTime(activity * 7, audioCtx.currentTime, 0.2);
+    }
+  }
 
   renderer.render(scene, camera);
 }
@@ -274,6 +460,7 @@ animate();
 
 // ================= RESIZE =================
 window.addEventListener('resize', () => {
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
